@@ -19,7 +19,9 @@ DeltaBotFirmware/           the sketch to flash now: a serial motion controller
 python/deltabot/            the host library and interactive terminal
   controller.py kinematics.py config.py sim.py console.py
   session.py                IPython remote control
-  scan.py camera.py         scans, with a camera viewer as the detector
+  scan.py camera.py         scans, on the plane or the raw motors, with a
+                            camera viewer as the detector
+  png.py                    dependency-free PNG writing/reading for scan images
 docs/                       images from the hardware test below
 ```
 
@@ -131,8 +133,37 @@ d.image(3)                  # the image saved at point 3
 load_scan("scans/scan_0004_mesh")
 ```
 
-Every point records the commanded `x`, `y`; the position the step counts
-give, `x_rb`, `y_rb`, `s0`..`s2`, `strain`; `time` from the start; and the
+### Raw motor control
+
+Everything above goes through the kinematics. To drive the three motors
+directly, in steps, with nothing in between:
+
+```python
+wm()                        # motor steps, screw extensions, preload, resulting x/y
+mvm(m0=2048)                # absolute steps; omitted motors stay put
+mvm(0, 0, 0)
+mvrm(m1=-500)               # relative steps
+
+d = ascan("m0", -4096, 4096, 17, Circles())        # one screw on its own
+d = dscan("m2", -1000, 1000, 11, SaveImage())      # relative, returns to start
+d = mmesh("m1", -2000, 2000, 5, "m2", -2000, 2000, 5, Circles())
+d = dmmesh("m0", -500, 500, 5, "m1", -500, 500, 5)
+d = run_scan([(0, 0, 0), (1000, -500, -500)], Circles(), space="steps")
+```
+
+A motor scan records the commanded `m0`, `m1`, `m2` in place of `x`, `y`;
+the readbacks (`s0`..`s2`, `x_rb`, `y_rb`, `strain`) are the same. There is no
+working radius check in motor space, but every point is checked against the
+firmware's step limits before anything moves. Raw moves are not balanced:
+unless a point's steps sum to zero the legs are pushed against each other,
+and the `strain` column (and `wm()`'s preload) shows how much. Jogging one
+screw like this is the way to calibrate the gain from the camera, or to check
+each motor's direction.
+
+### What a point records
+
+Every point records the commanded `x`, `y` (or `m0`..`m2`); the position the
+step counts give, `x_rb`, `y_rb`, `s0`..`s2`, `strain`; `time` from the start; and the
 viewer's `frame_id`. On top of that come the detectors:
 
 | Detector | Columns |
@@ -144,7 +175,9 @@ viewer's `frame_id`. On top of that come the detectors:
 
 Each scan is written to `scans/scan_NNNN_<name>/`: `data.csv` (a row per
 point, flushed as it goes), `meta.json` (command, points, geometry, viewer
-settings, status, timing) and `images/NNNN.npy`. **Ctrl-C** stops the stage
+settings, status, timing) and `images/NNNN.png` (8 or 16 bit, exact; an image
+PNG cannot hold exactly, such as one with fractional values, falls back to
+`NNNN.npy`, and `d.image(i)` opens either). **Ctrl-C** stops the stage
 and keeps everything measured so far, with `status` set to `aborted`.
 
 **Getting a frame from after the move.** The viewer is used in whichever

@@ -5,8 +5,14 @@
     data["x"], data["cx"]          # numpy columns
     data.plot("x", "cx")
 
-Every point records where the stage was asked to go (``x``, ``y``), where
-its steps say it went (``x_rb``, ``y_rb``, ``s0``..``s2``, ``strain``), when
+Scans run in the plane (``x``, ``y`` in mm, through the kinematics) or on the
+raw motors (``m0``, ``m1``, ``m2`` in steps, straight to the screws)::
+
+    scanner.ascan("m0", -2000, 2000, 21, Circles())       # one screw on its own
+    scanner.dmmesh("m1", -500, 500, 5, "m2", -500, 500, 5)
+
+Every point records where the stage was asked to go (``x``, ``y`` or
+``m0``..``m2``), where its steps say it went (``x_rb``, ``y_rb``, ``s0``..``s2``, ``strain``), when
 (``time``, seconds from the start) and, with a camera, which viewer frame the
 measurements came from (``frame_id``).  Detectors add their own columns.
 
@@ -15,7 +21,7 @@ Each scan goes into its own numbered directory under the data directory::
     scans/scan_0007_ascan/
         data.csv        one row per point, written as it is measured
         meta.json       the command, geometry, viewer settings, timing
-        images/0000.npy one per point with SaveImage
+        images/0000.png one per point with SaveImage
 
 The CSV is flushed after every point, so an aborted or crashed scan keeps
 everything it measured.  Ctrl-C stops the stage and ends the scan cleanly.
@@ -33,6 +39,7 @@ import numpy as np
 
 from .config import Geometry
 from .kinematics import Pose, common_mode, reachable, screws_to_pose
+from .png import read_png, write_png
 
 NAN = float("nan")
 
@@ -122,11 +129,16 @@ class Peaks(Detector):
 
 
 class SaveImage(Detector):
-    """Save the frame each point was measured on, as ``images/NNNN.npy``.
+    """Save the frame each point was measured on, as ``images/NNNN.png``.
 
     ``raw=True`` (the default) keeps the camera frame as it came, colour
     included; ``raw=False`` saves the greyscale image the analysis ran on.
     The ``image`` column holds the file name.
+
+    PNGs hold 8 or 16 bit values exactly.  The greyscale image is float64
+    even off an 8-bit camera, so whole-number values are stored as 8 or 16
+    bit; an image PNG cannot hold exactly (fractional or negative values) is
+    saved as ``NNNN.npy`` instead, and the column names that file.
     """
 
     def __init__(self, raw: bool = True):
@@ -135,15 +147,31 @@ class SaveImage(Detector):
     def read(self, frame, scan):
         if scan.path is None or frame.image is None:
             return {"image": ""}
-        img = frame.image
-        # The greyscale image is float64 even off an 8-bit camera.
-        if (img.dtype.kind == "f" and img.size and img.min() >= 0
-                and img.max() <= 255 and np.array_equal(img, np.rint(img))):
-            img = img.astype(np.uint8)
-        name = f"images/{scan.point:04d}.npy"
+        img = _png_ready(frame.image)
         (scan.path / "images").mkdir(exist_ok=True)
-        np.save(scan.path / name, img)
+        if img is None:
+            name = f"images/{scan.point:04d}.npy"
+            np.save(scan.path / name, frame.image)
+        else:
+            name = f"images/{scan.point:04d}.png"
+            write_png(scan.path / name, img)
         return {"image": name}
+
+
+def _png_ready(img: np.ndarray) -> Optional[np.ndarray]:
+    """The image as uint8/uint16 if PNG can store it exactly, else None."""
+    if img.ndim not in (2, 3) or (img.ndim == 3 and img.shape[2] > 4):
+        return None
+    if img.dtype in (np.uint8, np.uint16):
+        return img
+    if img.size == 0 or img.dtype.kind not in "uif":
+        return None
+    if img.dtype.kind == "f" and not np.array_equal(img, np.rint(img)):
+        return None
+    lo, hi = img.min(), img.max()
+    if lo < 0 or hi > 65535:
+        return None
+    return img.astype(np.uint8 if hi <= 255 else np.uint16)
 
 
 class Custom(Detector):
@@ -222,7 +250,8 @@ class ScanData:
         name = self.rows[point].get("image")
         if not name or self.path is None:
             raise KeyError(f"point {point} has no saved image")
-        return np.load(self.path / name)
+        path = self.path / name
+        return read_png(path) if path.suffix == ".png" else np.load(path)
 
     def plot(self, x: str, *ys: str, ax=None):
         """Plot columns against ``x`` (all numeric columns if none named)."""
@@ -279,23 +308,39 @@ class Scanner:
     # ---------------------------------------------------------- scan types
     def ascan(self, axis: str, start: float, stop: float, num: int,
               *detectors: Detector, **kw) -> ScanData:
-        """Scan one axis (``"x"`` or ``"y"``) through ``num`` points from
-        ``start`` to ``stop`` mm, holding the other where it is."""
-        x0, y0 = self._here()
-        values = np.linspace(start, stop, num)
-        points = [(v, y0) if axis == "x" else (x0, v) for v in self._axis(axis, values)]
-        return self.run(points, *detectors, kind="ascan", **kw)
+        """Scan one axis through ``num`` points from ``start`` to ``stop``,
+        holding the others where they are.
+
+        ``axis`` is ``"x"`` or ``"y"`` (mm, through the kinematics) or a raw
+        motor, ``"m0"``, ``"m1"`` or ``"m2"`` (absolute steps, that screw
+        alone - see :meth:`run`)."""
+        points, space, _ = self._line(axis, np.linspace(start, stop, num), False)
+        return self.run(points, *detectors, kind="ascan", space=space, **kw)
 
     def dscan(self, axis: str, start: float, stop: float, num: int,
               *detectors: Detector, return_to_start: bool = True, **kw) -> ScanData:
         """:meth:`ascan` relative to where the stage is now, returning there
         afterwards (also after Ctrl-C)."""
-        x0, y0 = self._here()
-        values = np.linspace(start, stop, num)
-        points = [(x0 + v, y0) if axis == "x" else (x0, y0 + v)
-                  for v in self._axis(axis, values)]
-        return self.run(points, *detectors, kind="dscan",
-                        return_to=(x0, y0) if return_to_start else None, **kw)
+        points, space, here = self._line(axis, np.linspace(start, stop, num), True)
+        return self.run(points, *detectors, kind="dscan", space=space,
+                        return_to=here if return_to_start else None, **kw)
+
+    def mmesh(self, a: str, a_start: float, a_stop: float, a_num: int,
+              b: str, b_start: float, b_stop: float, b_num: int,
+              *detectors: Detector, snake: bool = True, **kw) -> ScanData:
+        """A grid over two raw motors in absolute steps: rows along motor
+        ``a``, stepping motor ``b``; the third motor holds."""
+        return self._motor_grid(a, a_start, a_stop, a_num, b, b_start, b_stop,
+                                b_num, detectors, snake, False, False, "mmesh", kw)
+
+    def dmmesh(self, a: str, a_start: float, a_stop: float, a_num: int,
+               b: str, b_start: float, b_stop: float, b_num: int,
+               *detectors: Detector, snake: bool = True,
+               return_to_start: bool = True, **kw) -> ScanData:
+        """:meth:`mmesh` relative to the motors' current steps."""
+        return self._motor_grid(a, a_start, a_stop, a_num, b, b_start, b_stop,
+                                b_num, detectors, snake, True, return_to_start,
+                                "dmmesh", kw)
 
     def mesh(self, x_start: float, x_stop: float, x_num: int,
              y_start: float, y_stop: float, y_num: int,
@@ -324,21 +369,45 @@ class Scanner:
         cam = self._camera_for(camera)
         if cam:
             cam.prepare(hough=hough)
-        return self._measure(ScanContext(None), x, y, 0.0, detectors,
-                             cam, hough, fit, image)
+        return self._measure(ScanContext(None), {"x": x, "y": y}, 0.0,
+                             detectors, cam, hough, fit, image)
 
     # ------------------------------------------------------------ the loop
-    def run(self, points: Iterable[Tuple[float, float]], *detectors: Detector,
-            settle: Optional[float] = None, name: Optional[str] = None,
-            kind: str = "scan", return_to: Optional[Tuple[float, float]] = None,
+    def run(self, points: Iterable[Sequence[float]], *detectors: Detector,
+            space: str = "xy", settle: Optional[float] = None,
+            name: Optional[str] = None, kind: str = "scan",
+            return_to: Optional[Sequence[float]] = None,
             notes: str = "") -> ScanData:
-        """Visit each ``(x, y)`` in mm and measure with every detector."""
-        points = [(float(x), float(y)) for x, y in points]
+        """Visit each point and measure with every detector.
+
+        With ``space="xy"`` a point is ``(x, y)`` in mm and every move goes
+        through the kinematics, so nothing enters the over-constrained
+        direction.
+
+        With ``space="steps"`` a point is ``(m0, m1, m2)``, absolute step
+        positions sent straight to the three motors - raw motor control, with
+        no working radius check.  A point whose steps do not sum to zero
+        strains the flexures (the ``strain`` column shows how much).  Points
+        are checked against the firmware's step limits before anything moves.
+        """
         geom: Geometry = self.bot.geometry
-        outside = [p for p in points if not reachable(Pose(*p), geom)]
-        if outside:
-            raise ValueError(f"{len(outside)} point(s) lie outside the "
-                             f"{geom.max_radius_mm} mm working radius, e.g. {outside[0]}")
+        if space == "xy":
+            points = [(float(x), float(y)) for x, y in points]
+            outside = [p for p in points if not reachable(Pose(*p), geom)]
+            if outside:
+                raise ValueError(f"{len(outside)} point(s) lie outside the "
+                                 f"{geom.max_radius_mm} mm working radius, e.g. {outside[0]}")
+            names: Tuple[str, ...] = ("x", "y")
+            move = lambda p: self.bot.move_xy(*p)
+        elif space == "steps":
+            points = [tuple(int(round(s)) for s in p) for p in points]
+            if any(len(p) != 3 for p in points):
+                raise ValueError("a step point needs all three motor positions")
+            self._check_limits(points)
+            names = self._MOTORS
+            move = lambda p: self.bot.move_steps(*p)
+        else:
+            raise ValueError("space must be 'xy' or 'steps'")
         settle = self.settle if settle is None else settle
         camera, hough, fit, image = _needs(detectors)
         cam = self._camera_for(camera)
@@ -349,6 +418,7 @@ class Scanner:
             "name": path.name if path else (name or kind),
             "kind": kind, "notes": notes, "status": "running",
             "started": datetime.now().isoformat(timespec="seconds"),
+            "space": space, "axes": list(names),
             "points": points, "settle_s": settle,
             "detectors": [f"{type(d).__name__}({_describe(d)})" for d in detectors],
             "geometry": {k: getattr(geom, k) for k in geom.__dataclass_fields__},
@@ -368,12 +438,13 @@ class Scanner:
             print(f"{meta['name']}: {len(points)} points"
                   + (f" -> {path}" if path else ""))
         try:
-            for i, (x, y) in enumerate(points):
+            for i, p in enumerate(points):
                 ctx.point = i
-                self.bot.move_xy(x, y)
+                move(p)
                 if settle:
                     time.sleep(settle)
-                row = self._measure(ctx, x, y, t0, detectors, cam, hough, fit, image)
+                row = self._measure(ctx, dict(zip(names, p)), t0, detectors,
+                                    cam, hough, fit, image)
                 rows.append(row)
                 if path is not None:
                     if writer is None:
@@ -397,20 +468,20 @@ class Scanner:
             if fh is not None:
                 fh.close()
             if return_to is not None:
-                self._safely(lambda: self.bot.move_xy(*return_to))
+                self._safely(lambda: move(return_to))
             meta["finished"] = datetime.now().isoformat(timespec="seconds")
             meta["duration_s"] = round(time.time() - t0, 3)
             meta["measured"] = len(rows)
             self._write_meta(data)
         return data
 
-    def _measure(self, ctx, x, y, t0, detectors, cam, hough, fit, image) -> dict:
+    def _measure(self, ctx, commanded, t0, detectors, cam, hough, fit, image) -> dict:
         steps = self.bot.positions()
         geom = self.bot.geometry
         ext = [geom.steps_to_mm(i, s) for i, s in enumerate(steps)]
         pose = screws_to_pose(ext, geom)
         row = {"point": ctx.point, "time": round(time.time() - t0, 4) if t0 else 0.0,
-               "x": x, "y": y, "x_rb": pose.x, "y_rb": pose.y,
+               **commanded, "x_rb": pose.x, "y_rb": pose.y,
                "s0": steps[0], "s1": steps[1], "s2": steps[2],
                "strain": common_mode(ext)}
         frame = None
@@ -429,15 +500,59 @@ class Scanner:
                                "connect with connect_camera()")
         return self.camera if needed else None
 
-    def _here(self) -> Tuple[float, float]:
+    _MOTORS = ("m0", "m1", "m2")
+
+    def _here(self, space: str = "xy") -> tuple:
+        if space == "steps":
+            return tuple(self.bot.positions())
         p = self.bot.pose()
         return p.x, p.y
 
-    @staticmethod
-    def _axis(axis, values):
-        if axis not in ("x", "y"):
-            raise ValueError("axis must be 'x' or 'y'")
-        return values
+    def _motor(self, name: str) -> int:
+        if name not in self._MOTORS:
+            raise ValueError("motor must be 'm0', 'm1' or 'm2'")
+        return self._MOTORS.index(name)
+
+    def _line(self, axis, values, relative):
+        """Points along one axis, the rest held; returns (points, space, here)."""
+        if axis in ("x", "y"):
+            space, k = "xy", ("x", "y").index(axis)
+        elif axis in self._MOTORS:
+            space, k = "steps", self._motor(axis)
+        else:
+            raise ValueError("axis must be 'x', 'y', 'm0', 'm1' or 'm2'")
+        here = self._here(space)
+        points = []
+        for v in values:
+            p = list(here)
+            p[k] = (here[k] if relative else 0) + v
+            points.append(tuple(p))
+        return points, space, here
+
+    def _motor_grid(self, a, a_start, a_stop, a_num, b, b_start, b_stop, b_num,
+                    detectors, snake, relative, return_to_start, kind, kw):
+        ia, ib = self._motor(a), self._motor(b)
+        if ia == ib:
+            raise ValueError("a motor mesh needs two different motors")
+        here = self._here("steps")
+        base_a, base_b = (here[ia], here[ib]) if relative else (0, 0)
+        points = []
+        for va, vb in self._grid(base_a + np.linspace(a_start, a_stop, a_num),
+                                 base_b + np.linspace(b_start, b_stop, b_num), snake):
+            p = list(here)
+            p[ia], p[ib] = va, vb
+            points.append(tuple(p))
+        return self.run(points, *detectors, kind=kind, space="steps",
+                        return_to=here if relative and return_to_start else None, **kw)
+
+    def _check_limits(self, points) -> None:
+        lo, hi = self.bot.status()["limits"]
+        if lo == hi:            # firmware limits switched off
+            return
+        bad = [p for p in points if any(not lo <= s <= hi for s in p)]
+        if bad:
+            raise ValueError(f"{len(bad)} point(s) lie outside the firmware's "
+                             f"{lo}..{hi} step limits, e.g. {bad[0]}")
 
     @staticmethod
     def _grid(xs, ys, snake):
@@ -473,12 +588,17 @@ class Scanner:
 
     @staticmethod
     def _progress(i, n, row):
-        skip = {"point", "time", "x", "y", "x_rb", "y_rb", "s0", "s1", "s2",
-                "strain", "frame_id", "image"}
+        skip = {"point", "time", "x", "y", "m0", "m1", "m2", "x_rb", "y_rb",
+                "s0", "s1", "s2", "strain", "frame_id", "image"}
         extra = [(k, v) for k, v in row.items() if k not in skip][:5]
         text = "  ".join(f"{k}={v:.2f}" if isinstance(v, float) else f"{k}={v}"
                          for k, v in extra)
-        print(f"  {i + 1:>4}/{n}  x={row['x']:+.4f} y={row['y']:+.4f}  {text}")
+        if "x" in row:
+            where = f"x={row['x']:+.4f} y={row['y']:+.4f}"
+        else:
+            where = (" ".join(f"{m}={row[m]:+d}" for m in ("m0", "m1", "m2"))
+                     + f"  strain={row['strain']:+.4f}")
+        print(f"  {i + 1:>4}/{n}  {where}  {text}")
 
 
 def _describe(d: Detector) -> str:

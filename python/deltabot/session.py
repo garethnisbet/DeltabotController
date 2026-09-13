@@ -12,8 +12,9 @@ The prompt then has:
 
     bot                     the DeltaBot
     cam                     the viewer (cam.remote is its full remote API), or None
-    wh()  mv(x, y)  mvr(dx, dy)
-    ascan  dscan  mesh  dmesh  run_scan  count
+    wh()  mv(x, y)  mvr(dx, dy)                   plane, mm
+    wm()  mvm(m0, m1, m2)  mvrm(m0, m1, m2)       raw motors, steps
+    ascan  dscan  mesh  dmesh  mmesh  dmmesh  run_scan  count
     Circles  Peaks  SaveImage  Custom
     load_scan  connect_camera  scanner
 """
@@ -24,7 +25,7 @@ import atexit
 from .camera import Camera
 from .config import Geometry
 from .controller import DeltaBot
-from .kinematics import common_mode
+from .kinematics import common_mode, screws_to_pose
 from .scan import Circles, Custom, Peaks, SaveImage, Scanner, ScanData, load_scan
 
 
@@ -81,14 +82,39 @@ def main(argv=None) -> dict:
         bot.nudge_xy(dx, dy)
         wh()
 
+    def wm():
+        """Where are the raw motors: steps, screw extension, and the result."""
+        steps = bot.positions()
+        ext = [bot.geometry.steps_to_mm(i, s) for i, s in enumerate(steps)]
+        print("  motors  " + "  ".join(f"m{i}:{s:+d}" for i, s in enumerate(steps)))
+        print("  screws  " + "  ".join(f"m{i}:{h:+.4f} mm" for i, h in enumerate(ext))
+              + f"   preload {common_mode(ext):+.4f} mm")
+        print(f"  {screws_to_pose(ext, bot.geometry)}")
+
+    def mvm(m0=None, m1=None, m2=None):
+        """Move raw motors to absolute step positions; omitted motors stay put.
+
+        No kinematics: unless the three steps sum to zero this strains the
+        flexures - wm() shows the preload it leaves."""
+        target = [c if t is None else t
+                  for c, t in zip(bot.positions(), (m0, m1, m2))]
+        bot.move_steps(*target)
+        wm()
+
+    def mvrm(m0=0, m1=0, m2=0):
+        """Move raw motors by a relative number of steps."""
+        bot.move_steps(m0, m1, m2, relative=True)
+        wm()
+
     print(f"DeltaBot on {bot.conn.port}: {bot.banner}")
     print(f"camera: {cam if cam else 'not connected'}   scans -> {opts.data_dir}/")
     print(__doc__.split("The prompt then has:")[1].rstrip())
     return dict(
         bot=bot, cam=cam, scanner=scanner, connect_camera=connect_camera,
-        wh=wh, mv=mv, mvr=mvr,
+        wh=wh, mv=mv, mvr=mvr, wm=wm, mvm=mvm, mvrm=mvrm,
         ascan=scanner.ascan, dscan=scanner.dscan, mesh=scanner.mesh,
-        dmesh=scanner.dmesh, run_scan=scanner.run, count=scanner.count,
+        dmesh=scanner.dmesh, mmesh=scanner.mmesh, dmmesh=scanner.dmmesh,
+        run_scan=scanner.run, count=scanner.count,
         Circles=Circles, Peaks=Peaks, SaveImage=SaveImage, Custom=Custom,
         ScanData=ScanData, load_scan=load_scan,
     )
