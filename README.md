@@ -82,10 +82,11 @@ viewer side by side, so scans can move the stage and record what the camera
 sees at every point: Hough circle positions, Gaussian peak centres from the
 projection fits, and the images themselves.
 
-The camera side is the separate **CameraViewer** project (a PyQt5 /
-pyqtgraph image viewer with Hough detection, Gaussian fitting and a remote
-API); it is not part of this repository. Scans need the version of its
-`viewer_api.py` that provides `frame_info`, `grab`, `start_stream` /
+The camera side is the separate
+[**MicroscopeViewer**](https://github.com/garethnisbet/MicroscopeViewer)
+project (a PyQt5 / pyqtgraph image viewer with Hough detection, Gaussian
+fitting and a remote API); it is not part of this repository. Scans need a
+version of its `viewer_api.py` that provides `frame_info`, `grab`, `start_stream` /
 `stop_stream`, `wait_for_frame` and `measure`. Only that file (and the
 `results.py` next to it, NumPy only) is imported on this side. The stage-only
 commands and scans with `Custom` detectors that do not use the camera work
@@ -93,7 +94,8 @@ without it.
 
 ```bash
 # terminal 1: the viewer, with its remote API on
-cd ../CameraViewer && python3 image_visualiser.py --serve
+# (once: git clone https://github.com/garethnisbet/MicroscopeViewer next to this repo)
+cd ../MicroscopeViewer && python3 image_visualiser.py --serve
 
 # terminal 2: the stage
 cd python
@@ -101,8 +103,9 @@ ipython -i -m deltabot.session                   # auto-detect the Nano
 ipython -i -m deltabot.session -- --port sim     # simulator
 ```
 
-`viewer_api` is imported straight from `../CameraViewer`; set
-`CAMERA_VIEWER_PATH` if it lives somewhere else. Options after `--`:
+`viewer_api` is imported straight from a sibling `../MicroscopeViewer` (or
+`../CameraViewer`) directory; set `CAMERA_VIEWER_PATH` if it lives somewhere
+else. Options after `--`:
 `--gain`, `--viewer-port`, `--viewer-name`, `--no-camera`, `--data-dir`
 (default `scans`), `--settle` (seconds after each move, default 0.2).
 

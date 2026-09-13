@@ -1,4 +1,4 @@
-"""Camera measurements for scans, through the CameraViewer's remote API.
+"""Camera measurements for scans, through the MicroscopeViewer's remote API.
 
 The viewer runs as its own process with its API switched on::
 
@@ -20,8 +20,9 @@ results and image in one step and fits *that frame's* projections away from
 the viewer's GUI thread, so the fits match the circles and image exactly.
 
 ``viewer_api`` needs only the standard library and NumPy, so this imports it
-straight from the CameraViewer checkout: set ``CAMERA_VIEWER_PATH`` if it is
-not the sibling ``CameraViewer`` directory.
+straight from a checkout of https://github.com/garethnisbet/MicroscopeViewer:
+a sibling ``MicroscopeViewer`` (or ``CameraViewer``) directory next to this
+repository, or wherever ``CAMERA_VIEWER_PATH`` points.
 """
 
 import os
@@ -37,13 +38,18 @@ def _viewer_api():
     try:
         import viewer_api
     except ImportError:
-        path = os.environ.get("CAMERA_VIEWER_PATH") or str(
-            Path(__file__).resolve().parents[3] / "CameraViewer")
-        if not Path(path, "viewer_api.py").is_file():
+        parent = Path(__file__).resolve().parents[3]
+        env = os.environ.get("CAMERA_VIEWER_PATH")
+        candidates = ([Path(env)] if env else
+                      [parent / "MicroscopeViewer", parent / "CameraViewer"])
+        path = next((p for p in candidates if (p / "viewer_api.py").is_file()), None)
+        if path is None:
             raise ImportError(
-                f"cannot find viewer_api.py in {path} - set CAMERA_VIEWER_PATH "
-                "to the CameraViewer directory") from None
-        sys.path.insert(0, path)
+                "cannot find viewer_api.py in "
+                + " or ".join(str(p) for p in candidates)
+                + " - clone https://github.com/garethnisbet/MicroscopeViewer next "
+                "to this repository, or set CAMERA_VIEWER_PATH") from None
+        sys.path.insert(0, str(path))
         import viewer_api
     return viewer_api
 
@@ -60,7 +66,7 @@ class Frame:
 
 
 class Camera:
-    """A served CameraViewer, used as a detector.
+    """A served MicroscopeViewer, used as a detector.
 
         cam = Camera()                        # 127.0.0.1:8765
         cam.remote.enable_hough(min_radius=20, max_radius=60)
