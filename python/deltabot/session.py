@@ -14,6 +14,7 @@ The prompt then has:
     cam                     the viewer (cam.remote is its full remote API), or None
     wh()  mv(x, y)  mvr(dx, dy)                   plane, mm
     wm()  mvm(m0, m1, m2)  mvrm(m0, m1, m2)       raw motors, steps
+    zero()                                        current position becomes the origin
     ascan  dscan  mesh  dmesh  mmesh  dmmesh  run_scan  count
     Circles  Peaks  SaveImage  Custom
     load_scan  connect_camera  scanner
@@ -106,12 +107,28 @@ def main(argv=None) -> dict:
         bot.move_steps(m0, m1, m2, relative=True)
         wm()
 
+    def zero():
+        """Make the current position the origin: motors 0 steps, x = y = 0.
+
+        The machine has no endstops, so this is its only reference.  Any
+        preload present (from raw motor moves) becomes part of the new zero
+        and stays in every later move."""
+        steps = bot.positions()
+        ext = [bot.geometry.steps_to_mm(i, s) for i, s in enumerate(steps)]
+        strain = common_mode(ext)
+        bot.zero()
+        print("  zeroed; was motors " + "  ".join(f"m{i}:{s:+d}" for i, s in enumerate(steps))
+              + f"   {screws_to_pose(ext, bot.geometry)}")
+        if abs(strain) > 1e-6:
+            print(f"  note: {strain:+.4f} mm of preload is now part of the zero")
+        wm()
+
     print(f"DeltaBot on {bot.conn.port}: {bot.banner}")
     print(f"camera: {cam if cam else 'not connected'}   scans -> {opts.data_dir}/")
     print(__doc__.split("The prompt then has:")[1].rstrip())
     return dict(
         bot=bot, cam=cam, scanner=scanner, connect_camera=connect_camera,
-        wh=wh, mv=mv, mvr=mvr, wm=wm, mvm=mvm, mvrm=mvrm,
+        wh=wh, mv=mv, mvr=mvr, wm=wm, mvm=mvm, mvrm=mvrm, zero=zero,
         ascan=scanner.ascan, dscan=scanner.dscan, mesh=scanner.mesh,
         dmesh=scanner.dmesh, mmesh=scanner.mmesh, dmmesh=scanner.dmmesh,
         run_scan=scanner.run, count=scanner.count,

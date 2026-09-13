@@ -113,6 +113,7 @@ else. Options after `--`:
 
 ```python
 wh()                        # where is it
+zero()                      # make the current position the origin
 mv(0.5, 0)                  # absolute move, mm
 mvr(dy=-0.1)                # relative move
 
@@ -132,6 +133,67 @@ d.plot("x", "cx", "peak_x")
 d.image(3)                  # the image saved at point 3
 load_scan("scans/scan_0004_mesh")
 ```
+
+### Scan types
+
+Every scan takes its range first and then any number of detectors, moves
+the stage to each point in turn, waits `settle` seconds, measures, and
+writes a row. The whole list of points is checked before the first move, so
+a scan that would leave the working radius is refused without moving at
+all. Positions are in mm.
+
+**`ascan(axis, start, stop, num, *detectors)`** - an absolute line scan, for
+reference. `axis` is `"x"` or `"y"`; the stage visits `num` evenly spaced
+positions from `start` to `stop` inclusive, holding the other axis where it
+is, and stays at the last point.
+
+**`dscan(axis, start, stop, num, *detectors, return_to_start=True)`** - the
+same line, but `start` and `stop` are offsets from where the stage is now.
+Afterwards it moves back to where it began - also after Ctrl-C or an error.
+This is the usual scan for exploring around a feature: centre on it, then
+`dscan("x", -0.2, 0.2, 21, Circles())` looks 0.2 mm either side without
+having to know its absolute position.
+
+**`mesh(x_start, x_stop, x_num, y_start, y_stop, y_num, *detectors, snake=True)`**
+- an absolute grid of `x_num * y_num` points. It runs along x at the first
+y, steps y, and runs along x again. With `snake=True` every other row runs
+backwards, so the stage never makes a long return move between rows:
+
+```
+snake=True                snake=False
+ 1 → 2 → 3                 1 → 2 → 3
+         ↓                 ↙
+ 6 ← 5 ← 4                 4 → 5 → 6
+```
+
+Snaking is faster, but alternate rows approach each point from opposite
+directions, so any backlash shows up as a row-to-row offset (see "Tested on
+the hardware"); use `snake=False` when repeatability matters more than time.
+The stage stays at the last point.
+
+**`dmesh(x_start, x_stop, x_num, y_start, y_stop, y_num, *detectors, snake=True, return_to_start=True)`**
+- the same grid relative to the current position, returning there
+afterwards (also after Ctrl-C or an error). `dmesh(-0.1, 0.1, 5, -0.1, 0.1, 5,
+Circles())` maps a 0.2 mm square centred on wherever the stage is.
+
+**`run_scan(points, *detectors, space="xy")`** - any list of points, in the
+order given, for paths the other scans cannot make: a circle, a spiral,
+random positions, or revisiting the same spot to measure drift. Points are
+absolute `(x, y)` tuples, or `(m0, m1, m2)` step positions with
+`space="steps"` (see below). It does not return to the start unless you pass
+`return_to=(x, y)`.
+
+```python
+import numpy as np
+t = np.linspace(0, 2 * np.pi, 37)
+d = run_scan(list(zip(0.3 * np.cos(t), 0.3 * np.sin(t))), Circles(), name="circle")
+d = run_scan([(0, 0)] * 20, Circles(), settle=5.0, name="drift")   # same spot, every 5 s
+```
+
+All of them also accept `settle=` (override the session's settle time),
+`name=` (the directory is `scans/scan_NNNN_<name>`; it defaults to the scan
+type) and `notes=` (free text saved in `meta.json`). `count(*detectors)`
+measures once where the stage is, without moving or saving anything.
 
 ### Raw motor control
 
