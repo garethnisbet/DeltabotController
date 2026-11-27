@@ -358,6 +358,7 @@ class DeltaBot:
             if set(self.limit_hits) == {axis}:
                 return self.positions()[axis]
             raise
+        print(f"before raise switch {axis} did not trip within {mm:.2f} mm:", self.status()["sw"], self.limit_hits)
         raise DeltaBotError(f"switch {axis} did not trip within {mm:.2f} mm")
 
     def _back_off(self, axis: int, max_mm: float) -> float:
@@ -402,7 +403,7 @@ class DeltaBot:
             # It tripped early; back off again and make the whole approach slowly.
             backed = self._back_off(axis, g.home_release_max_mm)
             return self._seek_switch(axis, backed + step, g.home_slow_speed)
-        return self._seek_switch(axis, 2 * step, g.home_slow_speed)
+        return self._seek_switch(axis, 10 * step, g.home_slow_speed)
 
     def _home_axis(self, axis: int) -> None:
         """Home one screw from roughly neutral: a balanced move down onto its
@@ -438,7 +439,9 @@ class DeltaBot:
             except DeltaBotError:
                 pass
             raise
+        print("before set speed:", self.status()["sw"], self.limit_hits)
         self.set_speed(g.home_speed)
+        print("before final move:", self.status()["sw"], self.limit_hits)
         self.move_extensions(self._balanced(axis, -g.home_direction[axis] * g.home_offset_mm),
                              relative=True)
         pos = self.positions()

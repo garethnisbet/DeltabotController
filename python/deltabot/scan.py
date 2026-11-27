@@ -4,6 +4,7 @@
     data = scanner.ascan("x", -1, 1, 21, Circles(), Peaks("x"), SaveImage())
     data["x"], data["cx"]          # numpy columns
     data.plot("x", "cx")
+    tracked = scanner.ascan("x", -1, 1, 21, TrackedCircle(roi_width=80))
 
 Scans run in the plane (``x``, ``y`` in mm, through the kinematics) or on the
 raw motors (``m0``, ``m1``, ``m2`` in steps, straight to the screws)::
@@ -59,6 +60,9 @@ class Detector:
     def read(self, frame, scan: "ScanContext") -> Dict[str, object]:
         raise NotImplementedError
 
+    def reset(self) -> None:
+        """Clear detector state before a new scan or one-shot measurement."""
+
 
 class Circles(Detector):
     """Hough circle centres and radii, in pixels.
@@ -89,6 +93,94 @@ class Circles(Detector):
                          else (NAN, NAN, NAN))
             out[f"cx{tag}"], out[f"cy{tag}"], out[f"radius{tag}"] = cx, cy, r
         return out
+
+
+class TrackedCircle(Detector):
+    """Track one raw Hough circle using a fixed-size, moving ROI.
+
+    The first detected circle (strongest first) initializes the track. Later
+    detections are eligible only when their centres are inside the current
+    ROI; the eligible circle nearest the previous centre is selected. If no
+    circle qualifies, the ROI stays put and the target's last position is
+    returned in the ``track_*`` columns. The per-frame ``cx``, ``cy`` and
+    ``radius`` are NaN on a miss, and ``detected`` is 0.
+
+    ``roi_width`` and ``roi_height`` are in pixels. If ``roi_height`` is
+    omitted, the ROI is square. Use a fresh setting small enough to exclude
+    other circles but large enough for the expected movement between frames.
+    """
+
+    hough = True
+
+    def __init__(self, roi_width: float = 100.0,
+                 roi_height: Optional[float] = None):
+        self.roi_width = float(roi_width)
+        self.roi_height = (self.roi_width if roi_height is None
+                           else float(roi_height))
+        if (not math.isfinite(self.roi_width) or self.roi_width <= 0
+                or not math.isfinite(self.roi_height) or self.roi_height <= 0):
+            raise ValueError("ROI width and height must be finite and positive")
+        self.reset()
+
+    def reset(self) -> None:
+        self._center = None
+        self._radius = None
+
+    def read(self, frame, scan):
+        found = frame.hough.raw_circles
+        detections = ([] if found is None else
+                      [(int(c[0]), int(c[1]), int(c[2])) for c in found])
+        # print(detections)
+
+        if self._center is None:
+            eligible = detections
+            # print(eligible)
+        else:
+            cx, cy = self._center
+            half_w, half_h = self.roi_width / 2, self.roi_height / 2
+            eligible = [circle for circle in detections
+                        if abs(circle[0] - cx) <= half_w
+                        and abs(circle[1] - cy) <= half_h]
+            # print("else", eligible)
+
+        selected = None
+        if eligible:
+            # eligible = [(300, 300, 300), (200,200,200), (100,500,500)]
+            if self._center is None:
+                # selected = eligible[0] #original code  - just choose first ('strongest') circle 
+                if len(eligible) > 1:
+                    #choose eligible circle with lowest cx value - want to track 
+                    #cx is first value in the tuples in eligible, by default min() compares these values. 
+                    selected = min(eligible) 
+                    
+                else:
+                    selected = eligible[0]
+
+            else:
+                cx, cy = self._center
+                selected = min(eligible,
+                               key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2)
+            self._center = selected[:2]
+            self._radius = selected[2]
+
+        if self._center is None:
+            roi = (NAN, NAN, NAN, NAN)
+            tracked = (NAN, NAN, NAN)
+        else:
+            cx, cy = self._center
+            half_w, half_h = self.roi_width / 2, self.roi_height / 2
+            roi = (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
+            tracked = (cx, cy, self._radius)
+
+        measured = selected if selected is not None else (NAN, NAN, NAN)
+        return {
+            "detected": int(selected is not None),
+            "cx": measured[0], "cy": measured[1], "radius": measured[2],
+            "track_cx": tracked[0], "track_cy": tracked[1],
+            "track_radius": tracked[2],
+            "roi_x_min": roi[0], "roi_y_min": roi[1],
+            "roi_x_max": roi[2], "roi_y_max": roi[3],
+        }
 
 
 class Peaks(Detector):
@@ -364,6 +456,8 @@ class Scanner:
 
     def count(self, *detectors: Detector) -> dict:
         """Measure once where the stage is, without moving or saving."""
+        for detector in detectors:
+            detector.reset()
         x, y = self._here()
         camera, hough, fit, image = _needs(detectors)
         cam = self._camera_for(camera)
@@ -411,6 +505,10 @@ class Scanner:
         settle = self.settle if settle is None else settle
         camera, hough, fit, image = _needs(detectors)
         cam = self._camera_for(camera)
+        for detector in detectors:
+            detector.reset()
+        if cam and any(isinstance(d, TrackedCircle) for d in detectors):
+            cam.remote.set_scan_roi(None)
 
         path = self._new_dir(name or kind)
         ctx = ScanContext(path)
@@ -489,7 +587,13 @@ class Scanner:
             frame = self.last_frame = cam.acquire(hough=hough, fit=fit, image=image)
             row["frame_id"] = frame.frame_id
         for d in detectors:
-            row.update(d.read(frame, ctx))
+            result = d.read(frame, ctx)
+            row.update(result)
+            if isinstance(d, TrackedCircle) and cam is not None:
+                bounds = tuple(result[key] for key in (
+                    "roi_x_min", "roi_y_min", "roi_x_max", "roi_y_max"))
+                cam.remote.set_scan_roi(
+                    bounds if all(math.isfinite(v) for v in bounds) else None)
         return row
 
     # ------------------------------------------------------------- helpers

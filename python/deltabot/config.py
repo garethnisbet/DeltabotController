@@ -88,7 +88,7 @@ class Geometry:
     home_slow_speed: float = 120.0   # steps/s, the final approach
 
     # Motion defaults.  The 28BYJ-48 loses steps well before 1000 steps/s.
-    default_speed: float = 600.0
+    default_speed: float = 400.0
     default_accel: float = 2000.0
 
     @property

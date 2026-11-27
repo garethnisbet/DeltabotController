@@ -33,7 +33,7 @@ from .console import watch_pins as _watch_pins
 from .console import watch_switches as _watch_switches
 from .controller import DeltaBot
 from .kinematics import common_mode, screws_to_pose
-from .scan import Circles, Custom, Peaks, SaveImage, Scanner, ScanData, load_scan
+from .scan import Circles, Custom, Peaks, SaveImage, Scanner, ScanData, TrackedCircle, load_scan
 
 
 def main(argv=None) -> dict:
@@ -168,7 +168,7 @@ def main(argv=None) -> dict:
         ascan=scanner.ascan, dscan=scanner.dscan, mesh=scanner.mesh,
         dmesh=scanner.dmesh, mmesh=scanner.mmesh, dmmesh=scanner.dmmesh,
         run_scan=scanner.run, count=scanner.count,
-        Circles=Circles, Peaks=Peaks, SaveImage=SaveImage, Custom=Custom,
+        Circles=Circles, Peaks=Peaks, SaveImage=SaveImage, Custom=Custom, TrackedCircle=TrackedCircle,
         ScanData=ScanData, load_scan=load_scan,
     )
 
